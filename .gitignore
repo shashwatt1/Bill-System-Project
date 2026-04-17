@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+
+# Environment
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data (keep structure, ignore contents)
+data/input/*
+data/output/*
+data/samples/*
+!data/input/.gitkeep
+!data/output/.gitkeep
+!data/samples/.gitkeep
+
+# PaddleOCR model cache
+~/.paddleocr/
