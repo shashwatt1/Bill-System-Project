@@ -35,3 +35,4 @@ data/samples/*
 ~/.paddleocr/
 nohup.out
 .venv/
+__pycache__/
