@@ -16,6 +16,9 @@ class ParsedRow(BaseModel):
     description: Optional[str] = None
     upc: Optional[str] = None
     price: Optional[float] = None
+    disc: Optional[float] = None
+    dep: Optional[float] = None
+    net: Optional[float] = None
     total: Optional[float] = None
 
 
