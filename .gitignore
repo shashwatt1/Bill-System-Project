@@ -34,3 +34,4 @@ data/samples/*
 # PaddleOCR model cache
 ~/.paddleocr/
 nohup.out
+.venv/
