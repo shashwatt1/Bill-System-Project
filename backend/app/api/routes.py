@@ -1,11 +1,15 @@
 """API route definitions."""
 
-from fastapi import APIRouter, File, UploadFile, HTTPException
+from fastapi import APIRouter, File, UploadFile, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from io import BytesIO
+import cv2
 
+from app.config import COLUMN_RANGES
 from app.core.logger import get_logger
 from app.models.schema import ExtractionResponse
 from app.services.preprocess import preprocess_image
-from app.services.ocr import extract_text
+from app.services.ocr import extract_text, extract_table, debug_visualize
 from app.services.parser import reconstruct_layout
 from app.utils.helpers import validate_image_file
 
@@ -13,7 +17,7 @@ log = get_logger(__name__)
 router = APIRouter()
 
 
-@router.post("/extract", response_model=ExtractionResponse)
+@router.post("/extract")
 async def extract(file: UploadFile = File(...)):
     """Accept an invoice/bill image and return structured OCR results."""
 
@@ -34,23 +38,50 @@ async def extract(file: UploadFile = File(...)):
         log.exception("Preprocessing failed")
         raise HTTPException(status_code=500, detail="Image preprocessing failed")
 
-    # ── OCR ──
+    # ── Table Extraction ──
     try:
-        regions = extract_text(processed)
+        rows = extract_table(processed)
     except Exception as e:
-        log.exception("OCR extraction failed")
-        raise HTTPException(status_code=500, detail="OCR extraction failed")
+        log.exception("Table extraction failed")
+        raise HTTPException(status_code=500, detail="Table extraction failed")
 
-    # ── Parsed Layout ──
+    corrections_made = sum(len(r.get("_corrections", {})) for r in rows)
+
+    return {
+        "status": "success",
+        "rows": rows,
+        "row_count": len(rows),
+        "corrections_made": corrections_made
+    }
+
+
+@router.post("/debug")
+async def debug(file: UploadFile = File(...), show_validation: bool = Query(False)):
+    """Run extraction and return a visualization image."""
+    contents = await file.read()
+    error = validate_image_file(file.filename or "unknown", len(contents))
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+
     try:
-        parsed_rows = reconstruct_layout(regions)
+        processed = preprocess_image(contents)
     except Exception as e:
-        log.exception("Layout parsing failed")
-        raise HTTPException(status_code=500, detail="Layout parsing failed")
+        log.exception("Preprocessing failed")
+        raise HTTPException(status_code=500, detail="Image preprocessing failed")
 
-    return ExtractionResponse(
-        filename=file.filename or "unknown",
-        num_regions=len(regions),
-        regions=regions,
-        parsed_rows=parsed_rows,
-    )
+    try:
+        rows = extract_table(processed)
+    except Exception as e:
+        log.exception("Table extraction failed")
+        raise HTTPException(status_code=500, detail="Table extraction failed")
+
+    try:
+        annotated_img = debug_visualize(processed, rows, COLUMN_RANGES, show_validation=show_validation)
+        success, encoded_image = cv2.imencode(".jpg", annotated_img)
+        if not success:
+            raise ValueError("CV2 encoding failed")
+    except Exception as e:
+        log.exception("Visualization failed")
+        raise HTTPException(status_code=500, detail="Visualization failed")
+
+    return StreamingResponse(BytesIO(encoded_image.tobytes()), media_type="image/jpeg")
