@@ -1,9 +1,163 @@
-"""Layout reconstruction and parsing layer."""
+"""Layout reconstruction and pattern extraction engine."""
 
 import re
 from app.core.logger import get_logger
 
 log = get_logger(__name__)
+
+# --- DICTIONARY ---
+CORRECTIONS = {
+    "COORSLIGH": "COORS LIGHT",
+    "MILLERLIIE": "MILLER LITE",
+    "LIIE": "LITE",
+    "COORSLIGHT": "COORS LIGHT",
+    "MILLERLITE": "MILLER LITE",
+}
+
+
+def clean_text(text: str) -> str:
+    """Normalize text, fix spacing, and apply dictionary corrections."""
+    # Convert to upper and trim
+    clean = text.upper().strip()
+    
+    # Remove junk symbols (keep digits, letters, dots, spaces)
+    clean = re.sub(r'[^\w\s\.]', '', clean)
+
+    # Apply dictionary substitutions
+    for wrong, right in CORRECTIONS.items():
+        if wrong in clean:
+            clean = clean.replace(wrong, right)
+            
+    return clean
+
+
+def extract_numeric_fields(text: str) -> dict:
+    """
+    Split long numeric strings into structured values.
+    Example: 07199000048621950.00120231569.45
+    """
+    res = {
+        "upc": None,
+        "price": None,
+        "disc": None,
+        "dep": None,
+        "net": None,
+        "total": None
+    }
+    
+    text = text.replace(" ", "").strip()
+    if not text:
+        return res
+
+    # Extract 11-12 digit UPC
+    upc_match = re.match(r'^(\d{11,12})', text)
+    if upc_match:
+        res["upc"] = upc_match.group(1)
+        tail = text[upc_match.end():]
+    else:
+        # Fallback if no UPC
+        tail = text
+        
+    # Process remaining numbers as float values
+    # If the user's specific noisy string lacks dots or has dots in weird places,
+    # stripping dots and slicing heuristically from the back is extremely robust.
+    clean_tail = tail.replace(".", "")
+    
+    def to_float(s: str) -> float:
+        if len(s) >= 3:
+            return float(s[:-2] + "." + s[-2:])
+        elif len(s) == 2:
+            return float("0." + s)
+        elif len(s) == 1:
+            return float("0.0" + s)
+        return 0.0
+
+    # Heuristic slice: Total(4), Net(4), Dep(3), Disc(3), Price(remaining)
+    if len(clean_tail) >= 14:
+        try:
+            total_str = clean_tail[-4:]
+            net_str = clean_tail[-8:-4]
+            dep_str = clean_tail[-11:-8]
+            disc_str = clean_tail[-14:-11]
+            price_str = clean_tail[:-14]
+            
+            res["total"] = to_float(total_str)
+            res["net"] = to_float(net_str)
+            res["dep"] = to_float(dep_str)
+            res["disc"] = to_float(disc_str)
+            if price_str:
+                res["price"] = to_float(price_str)
+        except ValueError:
+            pass
+    else:
+        # Fallback to \d+\.\d+ if size matches were weird
+        floats = re.findall(r'\d+\.\d+', tail)
+        if floats:
+            try:
+                res["total"] = float(floats[-1])
+                if len(floats) > 1:
+                    res["price"] = float(floats[0])
+            except ValueError:
+                pass
+                
+    return res
+
+
+def classify_row(text: str) -> str:
+    """Classify row into item_row, header, noise, out_of_stock."""
+    upper = text.upper()
+    if "OUT OF STOCK" in upper:
+        return "out_of_stock"
+    if "ITEM" in upper or "QTY" in upper or "DESCRIPTION" in upper:
+        return "header"
+        
+    # Check if contains numbers + product words
+    if re.search(r'\d', text) and re.search(r'[A-Za-z]', text):
+        return "item_row"
+        
+    return "noise"
+
+
+def parse_item_row(text: str) -> dict:
+    """Extract QTY, description, and numeric financials from an item row."""
+    result = {
+        "qty": None,
+        "description": None,
+        "upc": None,
+        "price": None,
+        "disc": None,
+        "dep": None,
+        "net": None,
+        "total": None
+    }
+    
+    # 1. Extract QTY (First Number)
+    qty_match = re.search(r'^(\d{1,4})\s?', text)
+    if qty_match:
+        result["qty"] = int(qty_match.group(1))
+        text = text[qty_match.end():].strip()
+        
+    # 2. Split numeric block from description
+    block_match = re.search(r'(\d{11,}[\d\.\s]*)$', text)
+    if block_match:
+        numeric_block = block_match.group(1).replace(" ", "")
+        desc = text[:block_match.start()].strip()
+        result["description"] = clean_text(desc)
+        
+        # 3. & 4. Call numeric extraction
+        fields = extract_numeric_fields(numeric_block)
+        result.update(fields)
+    else:
+        # Fallback to general splits
+        parts = text.split()
+        if len(parts) >= 2:
+            result["description"] = clean_text(" ".join(parts[:-1]))
+            fields = extract_numeric_fields(parts[-1])
+            result.update(fields)
+        else:
+            result["description"] = clean_text(text)
+            
+    return result
 
 
 def group_rows(regions: list[dict], y_tolerance: float = 15.0) -> list[list[dict]]:
@@ -11,7 +165,6 @@ def group_rows(regions: list[dict], y_tolerance: float = 15.0) -> list[list[dict
     if not regions:
         return []
 
-    # Calculate average Y and min X for each region
     items = []
     for r in regions:
         bbox = r["bbox"]
@@ -19,12 +172,8 @@ def group_rows(regions: list[dict], y_tolerance: float = 15.0) -> list[list[dict
         min_x = min(p[0] for p in bbox)
         items.append({"avg_y": avg_y, "min_x": min_x, "region": r})
 
-    # Sort strictly by vertical position
     items.sort(key=lambda x: x["avg_y"])
-
-    rows = []
-    current_row = []
-    current_y = None
+    rows, current_row, current_y = [], [], None
 
     for item in items:
         if current_y is None:
@@ -50,112 +199,80 @@ def sort_row(row_items: list[dict]) -> list[dict]:
     return [item["region"] for item in sorted_items]
 
 
-def parse_row(text: str) -> dict:
-    """Smart split logic for a single reconstructed line."""
-    result = {
-        "item_code": None,
-        "qty": None,
-        "description": None,
-        "upc": None,
-        "price": None,
-        "total": None
-    }
-    
-    # Fast path: ignore short irrelevant lines
-    if len(text) < 5:
-        return result
-
-    # Standardize string for merged token cases
-    clean_text = text.replace(" ", "")
-
-    # Look for the specific merged pattern: QTY + DESC + UPC(11-12) + FINANCIALS
-    # e.g. "3COORSLIGHT07199000486219500020231569.4"
-    match = re.match(r'^(\d{1,4})?([A-Za-z]+)(\d{11,12})(\d*[\d\.]*)$', clean_text)
-    
-    if match:
-        qty_str = match.group(1)
-        desc_str = match.group(2)
-        upc_str = match.group(3)
-        tail_str = match.group(4)
-        
-        if qty_str:
-            result["qty"] = int(qty_str)
-        result["description"] = desc_str
-        
-        # Assume first 11 digits of the block are UPC
-        result["upc"] = upc_str[:11]
-        
-        # Re-attach the rest of the UPC block to the tail for financial heuristics
-        rem = upc_str[11:] + tail_str
-        rem_clean = rem.replace(".", "")
-        
-        # Price heuristic: 4 chars (e.g. 2195 -> 21.95)
-        if len(rem_clean) >= 4:
-            try:
-                result["price"] = float(rem_clean[:2] + "." + rem_clean[2:4])
-            except ValueError:
-                pass
-        
-        # Total heuristic
-        if "." in tail_str:
-            m = re.search(r'(\d{1,4}\.\d{1,2})$', tail_str)
-            if m:
-                try:
-                    result["total"] = float(m.group(1))
-                except ValueError:
-                    pass
-        else:
-            if len(rem_clean[-4:]) == 4:
-                try:
-                    result["total"] = float(rem_clean[-4:-2] + "." + rem_clean[-2:])
-                except ValueError:
-                    pass
-
-    else:
-        # Fallback: Just parse space-separated texts (standard case)
-        parts = text.split()
-        if len(parts) > 2:
-            try:
-                # Try to extract Qty and Total from first and last parts
-                if parts[0].isdigit():
-                    result["qty"] = int(parts[0])
-                
-                clean_last = parts[-1].replace('$', '').replace(',', '')
-                if clean_last.replace('.', '').isdigit():
-                    result["total"] = float(clean_last)
-                
-                # Assume everything between might be description & UPC
-                mid = parts[1:-1]
-                if mid and mid[-1].isdigit() and len(mid[-1]) >= 8:
-                    result["upc"] = mid[-1]
-                    result["description"] = " ".join(mid[:-1])
-                else:
-                    result["description"] = " ".join(mid)
-            except ValueError:
-                pass
-
-    return result
-
-
 def reconstruct_layout(ocr_regions: list[dict]) -> list[dict]:
-    """Main pipeline: group rows, sort columns, combine strings, parse details."""
+    """Pipeline flow: clean, classify, parse, filter, and extract items."""
     parsed_rows = []
     
-    # 1. Group rows based on Y-coordinate proximity
     row_groups = group_rows(ocr_regions)
     log.info("Layout Parsing: Grouped into %d distinct rows.", len(row_groups))
 
-    # 2. Process each row
     for group in row_groups:
         sorted_tokens = sort_row(group)
-        full_text = " ".join(token["text"] for token in sorted_tokens)
+        raw_text = " ".join(token["text"] for token in sorted_tokens)
         
-        # Extract structured details using regex and heuristics
-        parsed_data = parse_row(full_text)
+        # 1. Clean Text globally if needed, though we clean description later.
+        # We classify on the raw, but upper-case representation.
+        category = classify_row(raw_text)
         
-        # Filter valid items
-        if parsed_data.get("description") or parsed_data.get("upc") or parsed_data.get("qty"):
-            parsed_rows.append(parsed_data)
+        if category == "item_row":
+            parsed_data = parse_item_row(raw_text)
+            
+            # Filter completely empty or false positive rows
+            if parsed_data.get("description") or parsed_data.get("upc"):
+                parsed_rows.append(parsed_data)
+        elif category == "out_of_stock":
+            log.info("Skipping 'OUT OF STOCK' row: %s", raw_text)
+        elif category == "header":
+            log.info("Skipping recognized header: %s", raw_text)
+        else:
+            log.info("Skipping noise row: %s", raw_text)
 
-    log.info("Layout Parsing: Successfully structured %d line items.", len(parsed_rows))
+    log.info("Layout Parsing: Extracted %d item rows.", len(parsed_rows))
     return parsed_rows
+
+
+def validate_row(row: dict) -> dict:
+    """Validate arithmetic rules and types for row dicts.
+    
+    Rules (all with ±0.02 tolerance):
+      NET = PRICE - DISC + DEP
+      EXT = NET × QTY
+      UPC = 11 or 12 digits, all numeric
+    """
+    res = dict(row)
+    res["_net_valid"] = False
+    res["_ext_valid"] = False
+    res["_upc_valid"] = False
+    res["_validation_error"] = False
+
+    try:
+        qty_str = res.get("QTY", "0")
+        price_str = res.get("PRICE", "0")
+        disc_str = res.get("DISC", "0")
+        dep_str = res.get("DEP", "0")
+        net_str = res.get("NET", "0")
+        ext_str = res.get("EXT", "0")
+
+        # Handle empty strings mapping to 0
+        qty = float(qty_str) if qty_str else 0.0
+        price = float(price_str) if price_str else 0.0
+        disc = float(disc_str) if disc_str else 0.0
+        dep = float(dep_str) if dep_str else 0.0
+        net = float(net_str) if net_str else 0.0
+        ext = float(ext_str) if ext_str else 0.0
+
+        if abs((price - disc + dep) - net) <= 0.02:
+            res["_net_valid"] = True
+
+        if abs((net * qty) - ext) <= 0.02:
+            res["_ext_valid"] = True
+
+    except ValueError:
+        res["_validation_error"] = True
+
+    upc_str = str(res.get("UPC", "")).strip()
+    if upc_str.isdigit() and len(upc_str) in (11, 12):
+        res["_upc_valid"] = True
+
+    return res
+
