@@ -1,16 +1,17 @@
 """API route definitions."""
 
 from fastapi import APIRouter, File, UploadFile, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from io import BytesIO
 import cv2
 
-from app.config import COLUMN_RANGES_PCT as COLUMN_RANGES 
+from app.config import COLUMN_RANGES_PCT as COLUMN_RANGES
 from app.core.logger import get_logger
 from app.models.schema import ExtractionResponse
 from app.services.preprocess import preprocess_image
 from app.services.ocr import extract_text, extract_table, debug_visualize
 from app.services.parser import reconstruct_layout
+from app.services.exporter import export_rows
 from app.utils.helpers import validate_image_file
 
 log = get_logger(__name__)
@@ -85,3 +86,44 @@ async def debug(file: UploadFile = File(...), show_validation: bool = Query(Fals
         raise HTTPException(status_code=500, detail="Visualization failed")
 
     return StreamingResponse(BytesIO(encoded_image.tobytes()), media_type="image/jpeg")
+
+
+@router.post("/export")
+async def export(file: UploadFile = File(...), format: str = Query("json")):
+    """Preprocess, extract, and export rows in the requested format."""
+    contents = await file.read()
+    error = validate_image_file(file.filename or "unknown", len(contents))
+    if error:
+        raise HTTPException(status_code=400, detail=error)
+
+    log.info("Export request: file=%s, format=%s", file.filename, format)
+
+    try:
+        processed = preprocess_image(contents)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.exception("Preprocessing failed")
+        raise HTTPException(status_code=500, detail="Image preprocessing failed")
+
+    try:
+        rows = extract_table(processed)
+    except Exception as e:
+        log.exception("Table extraction failed")
+        raise HTTPException(status_code=500, detail="Table extraction failed")
+
+    try:
+        content, media_type = export_rows(rows, fmt=format)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        log.exception("Export formatting failed")
+        raise HTTPException(status_code=500, detail="Export failed")
+
+    headers = {}
+    if format.lower() == "csv":
+        headers["Content-Disposition"] = "attachment; filename=\"invoice_export.csv\""
+    elif format.lower() == "edi":
+        headers["Content-Disposition"] = "attachment; filename=\"invoice_export.edi\""
+
+    return Response(content=content, media_type=media_type, headers=headers)
