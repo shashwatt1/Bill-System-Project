@@ -273,6 +273,43 @@ def validate_row(row: dict) -> dict:
     upc_str = str(res.get("UPC", "")).strip()
     if upc_str.isdigit() and len(upc_str) in (11, 12):
         res["_upc_valid"] = True
-
     return res
 
+
+def merge_continuation_rows(rows: list[dict]) -> list[dict]:
+    """
+    Merges multi-line description rows into their parent row.
+    A continuation row has DESC populated but all numeric 
+    fields empty — it is the second (or third) physical line 
+    of a single invoice item.
+    """
+    NUMERIC_FIELDS = ["UPC", "PRICE", "DISC", "DEP", "NET", "EXT"]
+    
+    result = []
+    merged_count = 0
+    
+    for row in rows:
+        # Check if this is a continuation row
+        has_desc = bool(row.get("DESC", "").strip())
+        all_numeric_empty = all(
+            not row.get(f, "").strip() 
+            for f in NUMERIC_FIELDS
+        )
+        
+        is_continuation = has_desc and all_numeric_empty
+        
+        if is_continuation and result:
+            # Append DESC to previous row, separated by space
+            prev_desc = result[-1].get("DESC", "").strip()
+            cont_desc = row["DESC"].strip()
+            result[-1]["DESC"] = f"{prev_desc} {cont_desc}".strip()
+            merged_count += 1
+            # Do NOT append this row to result
+        else:
+            result.append(row)
+    
+    import logging
+    logger = logging.getLogger(__name__)
+    logger.info(f"Continuation merge: {merged_count} rows merged into previous rows")
+    
+    return result

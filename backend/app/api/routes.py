@@ -44,7 +44,7 @@ async def extract(file: UploadFile = File(...)):
         rows = extract_table(processed)
     except Exception as e:
         log.exception("Table extraction failed")
-        raise HTTPException(status_code=500, detail="Table extraction failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
     corrections_made = sum(len(r.get("_corrections", {})) for r in rows)
 
@@ -74,10 +74,16 @@ async def debug(file: UploadFile = File(...), show_validation: bool = Query(Fals
         rows = extract_table(processed)
     except Exception as e:
         log.exception("Table extraction failed")
-        raise HTTPException(status_code=500, detail="Table extraction failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
     try:
-        annotated_img = debug_visualize(processed, rows, COLUMN_RANGES, show_validation=show_validation)
+        # Resolve percentage column ranges to pixel values for the processed image
+        img_width = processed.shape[1]
+        column_ranges_px = {
+            col: (int(x1 * img_width), int(x2 * img_width))
+            for col, (x1, x2) in COLUMN_RANGES.items()
+        }
+        annotated_img = debug_visualize(processed, rows, column_ranges_px, show_validation=show_validation)
         success, encoded_image = cv2.imencode(".jpg", annotated_img)
         if not success:
             raise ValueError("CV2 encoding failed")
@@ -110,7 +116,7 @@ async def export(file: UploadFile = File(...), format: str = Query("json")):
         rows = extract_table(processed)
     except Exception as e:
         log.exception("Table extraction failed")
-        raise HTTPException(status_code=500, detail="Table extraction failed")
+        raise HTTPException(status_code=500, detail=str(e))
 
     try:
         content, media_type = export_rows(rows, fmt=format)

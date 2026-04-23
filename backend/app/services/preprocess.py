@@ -117,6 +117,14 @@ def preprocess_image(image_bytes: bytes) -> np.ndarray:
 
     log.info("Decoded image: %dx%d", img.shape[1], img.shape[0])
 
+    # Resize large images to cap width at 1200px before any further processing
+    max_width = 1200
+    h, w = img.shape[:2]
+    if w > max_width:
+        scale = max_width / w
+        img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+        log.info("Resized image to %dx%d (scale=%.2f)", img.shape[1], img.shape[0], scale)
+
     # Deskew before anything else
     img = deskew(img)
 
