@@ -1,11 +1,12 @@
 """OCR extraction using PaddleOCR — model loaded once at module level."""
 
+import math
 from paddleocr import PaddleOCR
 import numpy as np
 import cv2
 
 from app.core.config import OCR_LANG, OCR_USE_GPU
-from app.config import COLUMN_RANGES_PCT, ROW_GAP_THRESHOLD
+from app.config import COLUMN_RANGES_PCT, ROW_MIN_HEIGHT, MAX_ROW_HEIGHT
 from app.core.logger import get_logger
 from app.services.parser import validate_row
 from app.services.corrector import correct_row
@@ -43,41 +44,74 @@ def extract_text(image: np.ndarray) -> list[dict]:
 
 
 def extract_table(image: np.ndarray) -> list[dict]:
-    """Extract table rows and cells using row projection."""
-    # Convert image to grayscale
-    if len(image.shape) == 3:
-        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = image
+    """Extract table rows and cells using hardened row projection."""
 
-    # Horizontal projection: sum pixel values across each row (after binarization)
-    _, binary = cv2.threshold(gray, 128, 255, cv2.THRESH_BINARY_INV)
-    projection = np.sum(binary, axis=1)
+    # ── Step 1: Grayscale + Otsu binarize + invert ──
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-    # A "row gap" is where projection value is below a threshold
-    row_bands = []
+    # ── Step 2: Horizontal projection ──
+    projection = np.sum(binary, axis=1).astype(np.float32)
+
+    # ── Step 3: Adaptive gap threshold (5% of max projection) ──
+    gap_threshold = np.max(projection) * 0.05
+
+    # ── Step 4: Find contiguous non-gap bands ──
+    raw_bands = []
     in_row = False
     start_y = 0
-    
+
     for y, val in enumerate(projection):
-        if val > ROW_GAP_THRESHOLD:
+        if val >= gap_threshold:
             if not in_row:
                 in_row = True
                 start_y = y
         else:
             if in_row:
                 in_row = False
-                end_y = y
-                if end_y - start_y >= 10:  # Minimum row height: 10px
-                    row_bands.append((start_y, end_y))
-                    
+                raw_bands.append((start_y, y))
+
     if in_row:
-        end_y = len(projection)
-        if end_y - start_y >= 10:
-            row_bands.append((start_y, end_y))
+        raw_bands.append((start_y, len(projection)))
 
-    log.info("Detected %d rows", len(row_bands))
+    raw_count = len(raw_bands)
 
+    # ── Step 5: Min height filter + max height deterministic splitting ──
+    height_filtered = []
+    for y1, y2 in raw_bands:
+        height = y2 - y1
+        if height < ROW_MIN_HEIGHT:
+            continue
+        if height > MAX_ROW_HEIGHT:
+            n = math.ceil(height / MAX_ROW_HEIGHT)
+            sub_height = height // n
+            for i in range(n):
+                sub_y1 = y1 + (i * sub_height)
+                sub_y2 = sub_y1 + sub_height
+                height_filtered.append((sub_y1, sub_y2))
+        else:
+            height_filtered.append((y1, y2))
+
+    # ── Step 6: Row density filter ──
+    density_threshold = gap_threshold * 2
+    row_bands = []
+    for y1, y2 in height_filtered:
+        mean_density = float(np.mean(projection[y1:y2]))
+        if mean_density < density_threshold:
+            log.debug(
+                "Skipped low-density band: y1=%d, y2=%d, mean_density=%.1f, threshold=%.1f",
+                y1, y2, mean_density, density_threshold
+            )
+            continue
+        row_bands.append((y1, y2))
+        log.debug("Row band: y1=%d, y2=%d, height=%dpx", y1, y2, y2 - y1)
+
+    log.info(
+        "Row detection: %d raw bands found, %d after height filtering and density filtering",
+        raw_count, len(row_bands)
+    )
+
+    # ── Resolve column pixel ranges from percentage config ──
     img_width = image.shape[1]
     column_ranges_px = {
         col: (int(x1 * img_width), int(x2 * img_width))
@@ -85,27 +119,27 @@ def extract_table(image: np.ndarray) -> list[dict]:
     }
     log.info("Image width: %dpx — column ranges resolved", img_width)
 
+    # ── Cell OCR, correction, validation ──
     extracted_rows = []
     for y1, y2 in row_bands:
         row_dict = {}
-        
+
         for col_name, (x1, x2) in column_ranges_px.items():
             crop = image[y1:y2, x1:x2]
-            
+
             if crop.size == 0 or crop.shape[0] == 0 or crop.shape[1] == 0:
                 row_dict[col_name] = ""
                 continue
-                
+
             try:
                 result = _ocr_engine.ocr(crop, cls=False)
-                # extract text: result[0][0][1][0] if result and result[0] else ""
                 text = result[0][0][1][0] if result and result[0] else ""
                 row_dict[col_name] = text
                 log.debug("Cell [%s] dimensions: %sx%s, OCR: '%s'", col_name, crop.shape[1], crop.shape[0], text)
             except Exception as e:
                 log.error("OCR failed for cell %s: %s", col_name, e)
                 row_dict[col_name] = ""
-                
+
         # Skip if all fields are empty
         if not any(v.strip() for v in row_dict.values() if isinstance(v, str)):
             continue
@@ -113,10 +147,10 @@ def extract_table(image: np.ndarray) -> list[dict]:
         # Skip if more than 6 of 9 fields are empty
         if sum(1 for v in row_dict.values() if isinstance(v, str) and not v.strip()) > 6:
             continue
-            
+
         row_dict["_y1"] = y1
         row_dict["_y2"] = y2
-        
+
         corrected_row = correct_row(row_dict)
         validated_row = validate_row(corrected_row)
         extracted_rows.append(validated_row)
@@ -142,12 +176,10 @@ def debug_visualize(image: np.ndarray, row_bands: list, col_ranges: dict, show_v
         y1, y2 = r.get("_y1"), r.get("_y2")
         if y1 is None or y2 is None:
             continue
-            
+
         color = (0, 255, 0)  # Green by default
-        
+
         if show_validation:
-            # RED if any valid flag is False, GREEN if all True
-            # (only checking the strictly required arithmetic/upc fields which we validated)
             if not (r.get("_net_valid", False) and r.get("_ext_valid", False) and r.get("_upc_valid", False)) or r.get("_validation_error", False):
                 color = (0, 0, 255)  # Red (BGR)
 
@@ -155,5 +187,3 @@ def debug_visualize(image: np.ndarray, row_bands: list, col_ranges: dict, show_v
         cv2.line(img_copy, (0, y2), (img_copy.shape[1], y2), color, 1)
 
     return img_copy
-
-
