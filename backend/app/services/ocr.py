@@ -5,7 +5,7 @@ import numpy as np
 import cv2
 
 from app.core.config import OCR_LANG, OCR_USE_GPU
-from app.config import COLUMN_RANGES, ROW_GAP_THRESHOLD
+from app.config import COLUMN_RANGES_PCT, ROW_GAP_THRESHOLD
 from app.core.logger import get_logger
 from app.services.parser import validate_row
 from app.services.corrector import correct_row
@@ -78,11 +78,18 @@ def extract_table(image: np.ndarray) -> list[dict]:
 
     log.info("Detected %d rows", len(row_bands))
 
+    img_width = image.shape[1]
+    column_ranges_px = {
+        col: (int(x1 * img_width), int(x2 * img_width))
+        for col, (x1, x2) in COLUMN_RANGES_PCT.items()
+    }
+    log.info("Image width: %dpx — column ranges resolved", img_width)
+
     extracted_rows = []
     for y1, y2 in row_bands:
         row_dict = {}
         
-        for col_name, (x1, x2) in COLUMN_RANGES.items():
+        for col_name, (x1, x2) in column_ranges_px.items():
             crop = image[y1:y2, x1:x2]
             
             if crop.size == 0 or crop.shape[0] == 0 or crop.shape[1] == 0:

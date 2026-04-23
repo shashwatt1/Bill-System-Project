@@ -5,7 +5,7 @@ from fastapi.responses import StreamingResponse
 from io import BytesIO
 import cv2
 
-from app.config import COLUMN_RANGES
+from app.config import COLUMN_RANGES_PCT as COLUMN_RANGES 
 from app.core.logger import get_logger
 from app.models.schema import ExtractionResponse
 from app.services.preprocess import preprocess_image

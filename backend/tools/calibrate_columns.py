@@ -40,7 +40,11 @@ def main():
     cv2.destroyAllWindows()
     
     print("\n--- Calibration Summary ---")
-    print(f"Clicked X values: {sorted(clicked_x_values)}")
+    sorted_x = sorted(clicked_x_values)
+    print(f"Clicked X values: {sorted_x}")
+    img_width = img.shape[1]
+    pct_values = [f"{x / img_width:.3f}" for x in sorted_x]
+    print(f"Percentage equivalent: {pct_values}")
 
 if __name__ == "__main__":
     main()

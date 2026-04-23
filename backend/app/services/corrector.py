@@ -17,10 +17,12 @@ PRODUCT_MASTER = {
     "COORS LIGHT": ["COORSLIGH", "COORSLIGHT", "COORS LGT", 
                     "COORS LT", "COORSLIGH T"],
     "MILLER LITE": ["MILLERLIIE", "MILLER LIT", "MILLERLITE", 
-                    "MILLER LTE", "MLLERLIT"],
+                    "MILLER LTE", "MLLERLIT", 
+                    "M1LLER L1TE", "MILLER L1TE", "M1LLER LITE"],
     "BUD LIGHT":   ["BUDLIGH", "BUD LIGH", "BUD LGT", "BUDLIGHT"],
     "BUDWEISER":   ["BUDWEIZER", "BUDWISER", "BUDWIESER"],
-    "MICHELOB ULTRA": ["MICHELOB ULT", "MICHULTRA", "MICH ULTRA"],
+    "MICHELOB ULTRA": ["MICHELOB ULT", "MICHULTRA", "MICH ULTRA",
+                       "M1CH U1TRA", "MICH UL TRA", "MICHELOB UL", "MICHULTR"],
     "CORONA EXTRA":   ["CORONA EXT", "CORONAEXTR", "CORONA XTR"],
 }
 
@@ -35,11 +37,18 @@ def clean_numeric(raw: str) -> str:
     if not isinstance(raw, str) or not raw:
         return raw
 
+    # Gate: if raw is already a valid float or int, return immediately
+    try:
+        float(raw.strip())
+        log.debug("clean_numeric: '%s' already valid — skipped substitution", raw)
+        return raw.strip()
+    except ValueError:
+        pass  # proceed with correction
+
     SUBSTITUTION_MAP = {
         'S': '5', 's': '5',
         'I': '1', 'i': '1', 'l': '1',
         'O': '0', 'o': '0',
-        'B': '8', 'G': '6',
         'Z': '2', 'z': '2',
     }
 
@@ -55,6 +64,7 @@ def clean_numeric(raw: str) -> str:
 
     try:
         float(cleaned)
+        log.debug("clean_numeric: '%s' -> '%s' via substitution", raw, cleaned)
         return cleaned
     except ValueError:
         return raw
