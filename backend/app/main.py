@@ -3,8 +3,13 @@
 from fastapi import FastAPI
 from app.api.routes import router
 from app.core.logger import get_logger
+from app.services.ocr import get_ocr
 
 log = get_logger(__name__)
+
+# ── Pre-load OCR model before server startup to prevent macOS deadlocks ──
+log.info("Eagerly loading OCR model...")
+get_ocr()
 
 app = FastAPI(
     title="Document OCR API",

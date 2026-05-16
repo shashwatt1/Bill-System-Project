@@ -183,6 +183,9 @@ def extract_table(image: np.ndarray) -> list[dict]:
             log.error("OCR failed for row y1=%d: %s", y1, e)
             return (y1, y2, None)
 
+    # ── Eagerly initialize OCR in main thread to prevent deadlocks ──
+    get_ocr()
+
     # ── Parallel OCR across all rows ──
     ocr_start = time.time()
     with ThreadPoolExecutor(max_workers=6) as executor:
